@@ -1,10 +1,3 @@
-==>> The Ultimate DevSecOps Project Blueprint
-
-Brother, this is a brilliant idea. In DevOps, if it isn’t documented, it doesn’t exist! A professional README is what separates a student from an Engineer. I have prepared a comprehensive, "Executive-Level" documentation for you. 
-
-This is designed to be your **Master Reference**. It covers every single "Pain Point" we solved together—from the Docker-in-Docker path issues to the Gmail App Passwords.
-
-Copy the content below and save it as a file named `README.md` in the root of your GitHub repository.
 
 ---
 
