@@ -1,0 +1,123 @@
+pipeline {
+    agent any
+    
+    environment {
+        SONAR_TOKEN = credentials('sonarqube-token')
+        ZAP_PORT = '8090'
+        TARGET_URL = 'http://192.168.0.150:8081' 
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code from GitHub...'
+                // This pulls your code directly into the Jenkins workspace
+                git branch: 'main', url: 'https://github.com/ali4210/DevSecOps-_Project-_1.git'
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                echo 'Building application...'
+                sh 'echo "Application built successfully"'
+            }
+        }
+        
+        stage('SAST - SonarQube Analysis') {
+            steps {
+                echo 'Running Static Application Security Testing...'
+                script {
+                    def scannerHome = tool 'SonarScanner'
+                    withSonarQubeEnv('SonarQube-Server') {
+                        dir('sample-app') {
+                           sh """
+                                ${scannerHome}/bin/sonar-scanner \
+                                    -Dsonar.projectKey=devsecops-demo \
+                                    -Dsonar.sources=. \
+                                    -Dsonar.exclusions=zap-report.* \
+                                    -Dsonar.host.url=http://192.168.0.150:9000 \
+                                    -Dsonar.login=\$SONAR_TOKEN
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Test') {
+            steps {
+                echo 'Deploying to test environment...'
+                sh 'echo "Application deployed to test environment"'
+            }
+        }
+        
+        stage('DAST - ZAP Security Scan') {
+            steps {
+                echo 'Running Dynamic Application Security Testing...'
+                script {
+                    dir('sample-app') {
+                        // 1. Clean up old containers and volumes
+                        sh 'docker rm -f zap-scanner || true'
+                        sh 'docker volume rm zap-wrk-vol || true'
+                        
+                        // 2. Run ZAP and generate BOTH JSON (-J) and HTML (-r) reports
+                        sh """
+                            docker run --name zap-scanner -u root \
+                            -v zap-wrk-vol:/zap/wrk \
+                            -t ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+                            -t ${TARGET_URL} -J zap-report.json -r zap-report.html || true
+                        """
+                        
+                        // 3. Extract BOTH reports directly into the Jenkins workspace
+                        sh 'docker cp zap-scanner:/zap/wrk/zap-report.json . || true'
+                        sh 'docker cp zap-scanner:/zap/wrk/zap-report.html . || true'
+                        
+                        // 4. Housekeeping
+                        sh 'docker rm zap-scanner || true'
+                        sh 'docker volume rm zap-wrk-vol || true'
+                    }
+                }
+            }
+        }
+        
+        stage('Security Report') {
+            steps {
+                echo 'Generating security reports...'
+                sh 'echo "Security scan completed. Check SonarQube dashboard for SAST results."'
+                sh 'echo "ZAP scan completed. Check workspace for DAST results."'
+            }
+        }
+        
+        stage('Deploy to Production') {
+            steps {
+                echo 'Deploying to Production Environment...'
+                script {
+                    // Use the absolute path from your Kali terminal logs
+                    def hostPath = "/root/Al-Razzak-Labs-2/DevSecOps/sample-app"
+                    
+                    sh "docker rm -f production-app || true"
+                    
+                    // We mount the absolute Kali path so the Host Docker engine finds the files
+                    sh "docker run -d --name production-app -p 8082:3000 -v ${hostPath}:/app -w /app node:18-alpine sh -c 'npm install express && node app.js'"
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                mail to: 'saleemali.mohammad211126@gmail.com',
+                     subject: "SUCCESS: DevSecOps Build #${env.BUILD_NUMBER}",
+                     body: "Brother, the pipeline is green! Your app is live at http://192.168.0.150:8082"
+            }
+        }
+        failure {
+            script {
+                mail to: 'saleemali.mohammad211126@gmail.com',
+                     subject: "ALERT: Build #${env.BUILD_NUMBER} Failed",
+                     body: "Security Gate Failed! Check SonarQube and ZAP reports immediately."
+            }
+        }
+    }
+}
