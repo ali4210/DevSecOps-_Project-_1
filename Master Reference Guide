@@ -1,0 +1,1261 @@
+# 🔧 DevSecOps Master Reference Guide
+
+<div align="center">
+
+![Version](https://img.shields.io/badge/Version-1.0-blue?style=flat-square)
+![Status](https://img.shields.io/badge/Status-Battle--Tested-green?style=flat-square)
+![Platform](https://img.shields.io/badge/Platform-Kali%20Linux-red?style=flat-square)
+
+**Your Complete Troubleshooting & Setup Guide for Production DevSecOps Pipelines**
+
+*Created by: [Saleem Ali](https://www.linkedin.com/in/saleem-ali-189719325/)*
+
+</div>
+
+---
+
+## 📖 Table of Contents
+
+1. [Introduction](#-introduction)
+2. [Environment Specifications](#-environment-specifications)
+3. [Critical Problems & Solutions](#-critical-problems--solutions)
+4. [Complete Setup Guide](#-complete-setup-guide)
+5. [Pipeline Architecture](#-pipeline-architecture)
+6. [Testing & Validation](#-testing--validation)
+7. [Common Pitfalls](#-common-pitfalls)
+8. [Best Practices](#-best-practices)
+9. [Quick Reference Commands](#-quick-reference-commands)
+
+---
+
+## 🎯 Introduction
+
+This document captures **real-world engineering challenges** encountered during the implementation of a complete DevSecOps pipeline. Unlike theoretical guides, every solution here has been battle-tested in a production-like environment.
+
+### What This Guide Covers
+
+- ✅ Docker-in-Docker networking and path resolution
+- ✅ Jenkins webhook vs. SCM polling strategies
+- ✅ SonarQube Quality Gate configuration
+- ✅ OWASP ZAP integration and report generation
+- ✅ Gmail SMTP authentication with modern security
+- ✅ Container orchestration and volume mounting
+- ✅ Automated deployment strategies
+
+### When to Use This Guide
+
+- Setting up DevSecOps pipelines on local/VM environments
+- Troubleshooting Jenkins automation issues
+- Integrating security scanning tools (SAST/DAST)
+- Resolving Docker networking problems
+- Configuring notification systems
+
+---
+
+## 🖥️ Environment Specifications
+
+### Hardware & OS
+```
+Host Machine: Lenovo ThinkPad X260
+Operating System: Kali Linux
+RAM: 8GB (minimum 4GB required)
+Storage: 50GB+ free space
+```
+
+### Software Stack
+```
+Docker: 20.10+
+Docker Compose: 1.29+
+Jenkins: LTS (jenkins/jenkins:lts)
+SonarQube: Community Edition
+OWASP ZAP: 2.11+
+Node.js: 16+ (for sample app)
+```
+
+### Network Configuration
+```
+Jenkins Port: 8080
+SonarQube Port: 9000
+OWASP ZAP Port: 8090
+Test App Port: 8081
+Production App Port: 8082
+```
+
+---
+
+## 🚨 Critical Problems & Solutions
+
+### Problem 1: GitHub Webhook Returns 403 Forbidden
+
+#### 🔴 **Symptoms**
+- Jenkins is accessible locally
+- ngrok tunnel is active
+- GitHub webhook shows 403 error
+- Builds don't trigger automatically
+
+#### 🔍 **Root Cause**
+Jenkins' internal Jetty server rejects proxy headers from ngrok as potential **Host Header Injection attacks**. The CSRF protection mechanism blocks external webhook requests even with valid tokens.
+
+#### ✅ **Solution: Switch to SCM Polling**
+
+**Why This Works:**
+- Jenkins pulls from GitHub instead of waiting for push notifications
+- No external network dependencies
+- No proxy/tunnel requirements
+- More reliable in NAT/private IP environments
+
+**Implementation:**
+
+1. **Disable Webhooks** (if configured):
+   - Go to GitHub repo → Settings → Webhooks
+   - Delete or disable the webhook
+
+2. **Configure SCM Polling in Jenkinsfile**:
+```groovy
+pipeline {
+    agent any
+    
+    triggers {
+        pollSCM('* * * * *')  // Check every minute
+    }
+    
+    stages {
+        // ... your stages
+    }
+}
+```
+
+3. **Alternative: Configure in Jenkins UI**:
+   - Job → Configure → Build Triggers
+   - Check "Poll SCM"
+   - Schedule: `* * * * *` (every minute)
+   - Or `H/5 * * * *` (every 5 minutes, less aggressive)
+
+**Cron Syntax Reference:**
+```
+* * * * *  →  Every minute
+H/5 * * * *  →  Every 5 minutes (Jenkins distributes load)
+H H * * *  →  Once daily (Jenkins picks random time)
+```
+
+#### 📊 **Comparison: Webhook vs Polling**
+
+| Feature | Webhook | SCM Polling |
+|---------|---------|-------------|
+| **Trigger Speed** | Instant | 1-5 min delay |
+| **Network Requirements** | Public IP/ngrok | None |
+| **Reliability (Local)** | Low | High |
+| **Server Load** | Low | Medium |
+| **Best For** | Production servers | Local/VM setups |
+
+---
+
+### Problem 2: MODULE_NOT_FOUND in Production Container
+
+#### 🔴 **Symptoms**
+```bash
+docker logs production-app
+> Error: Cannot find module '/app/app.js'
+```
+- Container starts then immediately exits
+- `docker ps` shows no running production-app
+- Build succeeds but deployment fails
+
+#### 🔍 **Root Cause**
+**Docker-in-Docker Path Translation Issue**
+
+When Jenkins runs inside a container and calls the host's Docker engine:
+1. Jenkins sees the path as `/var/jenkins_home/workspace/...`
+2. It passes this path to the host Docker via `/var/run/docker.sock`
+3. Host Docker looks for `/var/jenkins_home/workspace/...` **on the host filesystem**
+4. Path doesn't exist on host → volume mount is empty → MODULE_NOT_FOUND
+
+**Visual Explanation:**
+```
+┌─────────────────────────────────────┐
+│  Jenkins Container                  │
+│  Path: /var/jenkins_home/workspace  │ ──┐
+└─────────────────────────────────────┘   │
+                                          │ Passes this path
+┌─────────────────────────────────────┐   │
+│  Host Docker Engine                 │ ◄─┘
+│  Looks for: /var/jenkins_home/...   │
+│  Result: PATH NOT FOUND ❌          │
+└─────────────────────────────────────┘
+```
+
+#### ✅ **Solution: Use Absolute Host Paths**
+
+**Step 1: Identify Your Absolute Host Path**
+```bash
+# On your host machine (not inside Jenkins container)
+pwd
+# Example output: /root/Al-Razzak/DevSecOps/sample-app
+```
+
+**Step 2: Update Jenkinsfile with Host Path**
+```groovy
+pipeline {
+    agent any
+    
+    environment {
+        // CRITICAL: Use absolute host path, not Jenkins workspace path
+        HOST_PATH = '/root/Al-Razzak/DevSecOps/sample-app'
+        APP_PORT = '8082'
+    }
+    
+    stages {
+        stage('Deploy to Production') {
+            steps {
+                script {
+                    sh """
+                        # Stop and remove old container
+                        docker stop production-app || true
+                        docker rm production-app || true
+                        
+                        # Deploy with absolute host path
+                        docker run -d \\
+                          --name production-app \\
+                          -p ${APP_PORT}:3000 \\
+                          -v ${HOST_PATH}:/app \\
+                          -w /app \\
+                          node:16 \\
+                          npm start
+                    """
+                }
+            }
+        }
+    }
+}
+```
+
+**Step 3: Verify Volume Mount**
+```bash
+# Check if container can see files
+docker exec production-app ls -la /app
+
+# Expected output:
+# app.js
+# package.json
+# node_modules/
+```
+
+#### 🔧 **Alternative Solutions (Not Recommended)**
+
+**Option A: Copy Files Instead of Mount**
+```groovy
+sh """
+    docker cp ${WORKSPACE}/. production-app:/app
+    docker start production-app
+"""
+```
+❌ **Drawback:** Changes require container rebuild
+
+**Option B: Use Named Volumes**
+```groovy
+sh """
+    docker volume create app-code
+    docker run -v app-code:/app ...
+"""
+```
+❌ **Drawback:** Complexity in syncing code updates
+
+#### 📝 **Key Takeaway**
+> When Jenkins is containerized, always use **absolute host paths** for Docker volume mounts. Never use `${WORKSPACE}` or relative paths.
+
+---
+
+### Problem 3: SonarQube Quality Gate Fails (Security Hotspots)
+
+#### 🔴 **Symptoms**
+- Pipeline fails at SonarQube stage
+- SonarQube "Issues" tab is empty
+- Quality Gate shows "Failed" status
+- No obvious bugs or vulnerabilities listed
+
+#### 🔍 **Root Cause**
+SonarQube detected **Security Hotspots** (code patterns that require manual review) but they weren't reviewed. Quality Gates require hotspots to be marked as "Reviewed" before passing.
+
+**Common Security Hotspots:**
+- Hardcoded credentials (`password = "admin123"`)
+- SQL query concatenation (injection risk)
+- Weak cryptographic algorithms
+- Insecure random number generation
+
+#### ✅ **Solution: Review Security Hotspots**
+
+**Step 1: Navigate to Security Hotspots**
+1. Open SonarQube dashboard: `http://your-ip:9000`
+2. Click on your project
+3. Click **"Security Hotspots"** tab (not "Issues")
+
+**Step 2: Review Each Hotspot**
+
+For each detected hotspot:
+
+```
+1. Click on the hotspot to view details
+2. Read SonarQube's explanation of the risk
+3. Make a determination:
+   
+   Option A - Code is Safe (False Positive):
+   • The credential is a test/dummy value
+   • The code runs in a controlled environment
+   • Action: Mark as "Safe"
+   
+   Option B - Code Needs Fixing:
+   • Real security vulnerability exists
+   • Action: Fix the code, then mark as "Fixed"
+   
+   Option C - Acknowledge Risk:
+   • You understand the risk but accept it
+   • Action: Mark as "Acknowledged"
+```
+
+**Step 3: Update Status**
+- Click **"Change Status"** button
+- Select appropriate status
+- Add a comment explaining your decision
+- Click **"Resolve"**
+
+**Example Decision Matrix:**
+
+| Code Pattern | Risk Level | Decision | Action |
+|--------------|------------|----------|--------|
+| `password = "test123"` in test file | Low | Safe | Mark as Safe |
+| `password = "prod_pass"` in main code | High | Fix | Update code |
+| SQL concatenation in prototype | Medium | Acknowledge | Document risk |
+
+#### 🔧 **Preventive Measures**
+
+**For Future Projects:**
+
+1. **Use Environment Variables**
+```javascript
+// ❌ Bad
+const password = "admin123";
+
+// ✅ Good
+const password = process.env.DB_PASSWORD;
+```
+
+2. **Use Parameterized Queries**
+```javascript
+// ❌ Bad
+const query = "SELECT * FROM users WHERE id='" + userId + "'";
+
+// ✅ Good
+const query = "SELECT * FROM users WHERE id=?";
+db.query(query, [userId]);
+```
+
+3. **Configure Quality Gate Thresholds**
+   - Go to Quality Gates → Create/Edit
+   - Set conditions based on your security requirements
+   - Example: "Security Hotspots Reviewed < 100%"
+
+---
+
+### Problem 4: Gmail SMTP Authentication Fails
+
+#### 🔴 **Symptoms**
+```
+javax.mail.AuthenticationFailedException: 535-5.7.8 Username and Password not accepted
+```
+- Jenkins pipeline succeeds
+- No email notifications received
+- System log shows authentication errors
+
+#### 🔍 **Root Cause**
+Google blocks "less secure app access" by default. Standard password authentication is rejected even if credentials are correct.
+
+#### ✅ **Solution: Use Gmail App Passwords**
+
+**Step 1: Enable 2-Factor Authentication**
+1. Go to Google Account: https://myaccount.google.com
+2. Security → 2-Step Verification
+3. Follow setup wizard
+4. ⚠️ **Required:** You cannot create App Passwords without 2FA enabled
+
+**Step 2: Generate App Password**
+1. Go to: https://myaccount.google.com/apppasswords
+2. Or: Google Account → Security → App passwords
+3. Select app: **Mail**
+4. Select device: **Other (Custom name)**
+5. Enter name: `Jenkins DevSecOps Pipeline`
+6. Click **Generate**
+7. **Copy the 16-character password** (format: `xxxx xxxx xxxx xxxx`)
+8. ⚠️ **Important:** You won't see this password again!
+
+**Step 3: Configure Jenkins Email**
+
+1. **Add Credentials:**
+   - Manage Jenkins → Manage Credentials
+   - Click **(global)** → Add Credentials
+   - Kind: **Username with password**
+   - Username: `your-email@gmail.com`
+   - Password: **Paste the 16-character App Password** (remove spaces)
+   - ID: `gmail-smtp`
+   - Description: `Gmail SMTP for Notifications`
+
+2. **Configure Email System:**
+   - Manage Jenkins → Configure System
+   - Scroll to **Extended E-mail Notification**
+   
+   ```
+   SMTP server: smtp.gmail.com
+   SMTP Port: 465
+   Credentials: Select "gmail-smtp"
+   ☑ Use SSL
+   Default user e-mail suffix: @gmail.com
+   ```
+
+3. **Test Configuration:**
+   - Check **"Test configuration by sending test e-mail"**
+   - Test e-mail recipient: `your-email@gmail.com`
+   - Click **Test configuration**
+   - Should show: "Email was successfully sent"
+
+**Step 4: Add to Jenkinsfile**
+```groovy
+pipeline {
+    agent any
+    
+    environment {
+        EMAIL_RECIPIENT = 'your-email@gmail.com'
+    }
+    
+    stages {
+        // ... your stages
+    }
+    
+    post {
+        success {
+            emailext (
+                to: "${EMAIL_RECIPIENT}",
+                subject: "✅ Build SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    Build Status: SUCCESS
+                    Job: ${env.JOB_NAME}
+                    Build Number: ${env.BUILD_NUMBER}
+                    
+                    View details: ${env.BUILD_URL}
+                """,
+                mimeType: 'text/plain'
+            )
+        }
+        
+        failure {
+            emailext (
+                to: "${EMAIL_RECIPIENT}",
+                subject: "❌ Build FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    Build Status: FAILED
+                    Job: ${env.JOB_NAME}
+                    Build Number: ${env.BUILD_NUMBER}
+                    
+                    Check logs: ${env.BUILD_URL}console
+                """,
+                mimeType: 'text/plain'
+            )
+        }
+    }
+}
+```
+
+#### 📧 **Email Template Best Practices**
+
+**Include These Details:**
+- ✅ Build status (SUCCESS/FAILURE)
+- ✅ Job name and build number
+- ✅ Direct link to build
+- ✅ Timestamp
+- ✅ Changed files (for failures)
+
+**Example Advanced Template:**
+```groovy
+emailext (
+    to: "${EMAIL_RECIPIENT}",
+    subject: "${env.BUILD_STATUS}: ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+    body: """
+        <html>
+        <body style="font-family: Arial, sans-serif;">
+            <h2 style="color: ${env.BUILD_STATUS == 'SUCCESS' ? 'green' : 'red'};">
+                Build ${env.BUILD_STATUS}
+            </h2>
+            <table>
+                <tr><td><b>Job:</b></td><td>${env.JOB_NAME}</td></tr>
+                <tr><td><b>Build:</b></td><td>#${env.BUILD_NUMBER}</td></tr>
+                <tr><td><b>Duration:</b></td><td>${currentBuild.durationString}</td></tr>
+                <tr><td><b>Started:</b></td><td>${new Date(currentBuild.startTimeInMillis)}</td></tr>
+            </table>
+            <p><a href="${env.BUILD_URL}">View Build Details</a></p>
+            <p><a href="${env.BUILD_URL}console">View Console Output</a></p>
+        </body>
+        </html>
+    """,
+    mimeType: 'text/html'
+)
+```
+
+#### 🔐 **Security Notes**
+
+1. **App Password vs Regular Password**
+   - App Password: 16 characters, works for automation
+   - Regular Password: Won't work even if 2FA is off
+
+2. **Revoke Access**
+   - Go to Google Account → Security → App passwords
+   - Find "Jenkins DevSecOps Pipeline"
+   - Click Remove
+
+3. **Multiple Environments**
+   - Create separate App Passwords for Dev/Staging/Prod
+   - Easier to revoke if one environment is compromised
+
+---
+
+### Problem 5: OWASP ZAP Report Not Generated
+
+#### 🔴 **Symptoms**
+- Pipeline shows ZAP stage as successful
+- No `report.json` or `report.html` in workspace
+- Jenkins archive step fails
+
+#### 🔍 **Root Cause**
+ZAP container exits before report is written, or report path is incorrect.
+
+#### ✅ **Solution: Proper ZAP Integration**
+
+**Working ZAP Scan Implementation:**
+```groovy
+stage('DAST - ZAP Security Scan') {
+    steps {
+        script {
+            sh """
+                # Create reports directory
+                mkdir -p ${WORKSPACE}/zap-reports
+                
+                # Run ZAP baseline scan
+                docker run --rm \\
+                  -v ${WORKSPACE}/zap-reports:/zap/wrk/:rw \\
+                  -t owasp/zap2docker-stable zap-baseline.py \\
+                  -t http://your-app-url:8081 \\
+                  -J report.json \\
+                  -r report.html \\
+                  -x report.xml || true
+                
+                # Verify reports were created
+                ls -lh ${WORKSPACE}/zap-reports/
+            """
+        }
+    }
+    
+    post {
+        always {
+            // Archive reports
+            archiveArtifacts artifacts: 'zap-reports/*', allowEmptyArchive: true
+            
+            // Publish HTML report (requires HTML Publisher plugin)
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: 'zap-reports',
+                reportFiles: 'report.html',
+                reportName: 'ZAP Security Report'
+            ])
+        }
+    }
+}
+```
+
+**Key Points:**
+- Use `--rm` to auto-remove container after scan
+- Mount volume with `:rw` (read-write) permission
+- Use `|| true` to prevent pipeline failure on vulnerabilities found
+- Always verify report creation with `ls` command
+
+---
+
+## 📚 Complete Setup Guide
+
+### Step 1: Prepare Host Environment
+
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install Docker
+sudo apt install docker.io docker-compose -y
+
+# Add user to docker group
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Verify installation
+docker --version
+docker-compose --version
+```
+
+### Step 2: Create Project Structure
+
+```bash
+# Create project directory
+mkdir -p ~/DevSecOps
+cd ~/DevSecOps
+
+# Create subdirectories
+mkdir -p sample-app jenkins-data sonarqube-data zap-data
+
+# Set permissions
+chmod -R 755 .
+```
+
+### Step 3: Deploy Jenkins
+
+**Create `docker-compose-jenkins.yml`:**
+```yaml
+version: '3.8'
+services:
+  jenkins:
+    image: jenkins/jenkins:lts
+    container_name: jenkins-server
+    restart: unless-stopped
+    privileged: true
+    user: root
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+
+volumes:
+  jenkins_home:
+```
+
+**Start Jenkins:**
+```bash
+docker-compose -f docker-compose-jenkins.yml up -d
+
+# Get initial admin password
+docker exec jenkins-server cat /var/jenkins_home/secrets/initialAdminPassword
+
+# Access: http://your-ip:8080
+```
+
+### Step 4: Deploy SonarQube
+
+**Create `docker-compose-sonarqube.yml`:**
+```yaml
+version: '3.8'
+services:
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonarqube-server
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+
+volumes:
+  sonarqube_data:
+  sonarqube_logs:
+  sonarqube_extensions:
+```
+
+**Start SonarQube:**
+```bash
+docker-compose -f docker-compose-sonarqube.yml up -d
+
+# Wait 3-4 minutes for startup
+docker logs -f sonarqube-server
+
+# Access: http://your-ip:9000
+# Login: admin / admin (change password on first login)
+```
+
+### Step 5: Deploy OWASP ZAP
+
+**Create `docker-compose-zap.yml`:**
+```yaml
+version: '3.8'
+services:
+  zap:
+    image: owasp/zap2docker-stable
+    container_name: zap-server
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    command: zap-webswing.sh
+    volumes:
+      - zap_data:/zap/wrk
+
+volumes:
+  zap_data:
+```
+
+**Start ZAP:**
+```bash
+docker-compose -f docker-compose-zap.yml up -d
+
+# Access: http://your-ip:8090
+```
+
+### Step 6: Create Sample Application
+
+**Directory: `~/DevSecOps/sample-app/`**
+
+**File: `app.js`**
+```javascript
+const express = require('express');
+const app = express();
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+app.get('/', (req, res) => {
+    res.send(`
+        <h1>DevSecOps Demo Application</h1>
+        <form method="POST" action="/login">
+            <input type="text" name="username" placeholder="Username"><br>
+            <input type="password" name="password" placeholder="Password"><br>
+            <button type="submit">Login</button>
+        </form>
+    `);
+});
+
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+    
+    // Security issue: Hardcoded credentials
+    if (username === 'admin' && password === 'password123') {
+        res.send('Login successful!');
+    } else {
+        res.send('Login failed!');
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
+```
+
+**File: `package.json`**
+```json
+{
+  "name": "devsecops-demo-app",
+  "version": "1.0.0",
+  "description": "Demo application for DevSecOps pipeline",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
+```
+
+**File: `sonar-project.properties`**
+```properties
+sonar.projectKey=devsecops-demo
+sonar.projectName=DevSecOps Demo Project
+sonar.projectVersion=1.0
+sonar.sources=.
+sonar.language=js
+sonar.sourceEncoding=UTF-8
+```
+
+**Install Dependencies:**
+```bash
+cd ~/DevSecOps/sample-app
+npm install
+```
+
+### Step 7: Configure Jenkins Pipeline
+
+**Required Plugins:**
+1. Go to Manage Jenkins → Manage Plugins → Available
+2. Install:
+   - SonarQube Scanner
+   - Email Extension Plugin
+   - Pipeline
+   - Git
+   - HTML Publisher
+
+**Create New Pipeline Job:**
+1. New Item → Pipeline → Name: `DevSecOps-Pipeline`
+2. Configure → Pipeline → Pipeline script:
+
+```groovy
+pipeline {
+    agent any
+    
+    environment {
+        HOST_PATH = '/root/DevSecOps/sample-app'  // Update this path
+        APP_PORT = '8082'
+        SONAR_TOKEN = credentials('sonarqube-token')
+        EMAIL_RECIPIENT = 'your-email@gmail.com'  // Update this
+    }
+    
+    triggers {
+        pollSCM('* * * * *')  // Poll every minute
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code...'
+                // Add your Git checkout here if using version control
+                sh 'echo "Code checked out successfully"'
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                echo 'Building application...'
+                dir("${HOST_PATH}") {
+                    sh 'npm install'
+                }
+            }
+        }
+        
+        stage('SAST - SonarQube') {
+            steps {
+                echo 'Running Static Application Security Testing...'
+                script {
+                    def scannerHome = tool 'SonarScanner'
+                    withSonarQubeEnv('SonarQube-Server') {
+                        sh """
+                            cd ${HOST_PATH}
+                            ${scannerHome}/bin/sonar-scanner
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        
+        stage('Deploy to Production') {
+            steps {
+                echo 'Deploying to production...'
+                sh """
+                    docker stop production-app || true
+                    docker rm production-app || true
+                    
+                    docker run -d \\
+                      --name production-app \\
+                      -p ${APP_PORT}:3000 \\
+                      -v ${HOST_PATH}:/app \\
+                      -w /app \\
+                      node:16 \\
+                      npm start
+                """
+            }
+        }
+        
+        stage('DAST - ZAP Scan') {
+            steps {
+                echo 'Running Dynamic Application Security Testing...'
+                sh """
+                    mkdir -p ${WORKSPACE}/zap-reports
+                    
+                    docker run --rm \\
+                      -v ${WORKSPACE}/zap-reports:/zap/wrk/:rw \\
+                      -t owasp/zap2docker-stable zap-baseline.py \\
+                      -t http://host.docker.internal:${APP_PORT} \\
+                      -J report.json \\
+                      -r report.html || true
+                """
+            }
+        }
+    }
+    
+    post {
+        always {
+            archiveArtifacts artifacts: 'zap-reports/*', allowEmptyArchive: true
+        }
+        success {
+            emailext (
+                to: "${EMAIL_RECIPIENT}",
+                subject: "✅ Pipeline SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: "Build completed successfully. View: ${env.BUILD_URL}",
+                mimeType: 'text/plain'
+            )
+        }
+        failure {
+            emailext (
+                to: "${EMAIL_RECIPIENT}",
+                subject: "❌ Pipeline FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: "Build failed. Check logs: ${env.BUILD_URL}console",
+                mimeType: 'text/plain'
+            )
+        }
+    }
+}
+```
+
+---
+
+## 🏗️ Pipeline Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     GitHub Repository                        │
+│                    (Source Code Storage)                     │
+└────────────────────┬─────────────────────────────────────────┘
+                     │
+                     │ SCM Polling (Every 1 min)
+                     ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    Jenkins CI/CD Server                      │
+│                   (Orchestration Engine)                     │
+└──┬────────┬────────┬────────┬────────┬─────────┬────────────┘
+   │        │        │        │        │         │
+   │        │        │        │        │         │
+   ▼        ▼        ▼        ▼        ▼         ▼
+┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌──────────┐
+│Build│ │SAST │ │Gate │ │Deploy│ │DAST │ │  Email   │
+│     │ │     │ │     │ │      │ │     │ │  Alert   │
+└─────┘ └──┬──┘ └──┬──┘ └───┬──┘ └──┬──┘ └──────────┘
+          │       │        │       │
+          ▼       ▼        ▼       ▼
+    ┌──────────┐ │   ┌─────────┐ ┌─────────┐
+    │SonarQube │ │   │ Docker  │ │OWASP ZAP│
+    │  Server  │ │   │Container│ │ Scanner │
+    └──────────┘ │   └─────────┘ └─────────┘
+                 │
+                 ▼
+         Quality Gate Pass?
+              Yes │ No
+                  │  └─> Abort Pipeline
+                  ▼
+         ┌──────────────┐
+         │ Production   │
+         │ Application  │
+         │ Port: 8082   │
+         └──────────────┘
+```
+
+---
+
+## ✅ Testing & Validation
+
+### Verify All Services Are Running
+
+```bash
+# Check all containers
+docker ps
+
+# Expected output:
+# jenkins-server      (8080)
+# sonarqube-server    (9000)
+# zap-server          (8090)
+# production-app      (8082)
+```
+
+### Test Each Component
+
+**1. Jenkins**
+```bash
+curl http://localhost:8080
+# Should return HTML login page
+```
+
+**2. SonarQube**
+```bash
+curl http://localhost:9000
+# Should return SonarQube dashboard
+```
+
+**3. Production App**
+```bash
+curl http://localhost:8082
+# Should return application HTML
+```
+
+**4. Check Logs**
+```bash
+docker logs jenkins-server --tail 50
+docker logs sonarqube-server --tail 50
+docker logs production-app --tail 50
+```
+
+### Manual Pipeline Test
+
+1. Make a small code change in `sample-app/app.js`
+2. Wait 1 minute for SCM polling
+3. Check Jenkins dashboard for new build
+4. Monitor Console Output
+5. Verify email notification received
+
+---
+
+## ⚠️ Common Pitfalls
+
+### 1. **Using Jenkins Workspace Path for Docker Volumes**
+```groovy
+# ❌ WRONG
+-v ${WORKSPACE}/app:/app
+
+# ✅ CORRECT
+-v /absolute/host/path:/app
+```
+
+### 2. **Forgetting to Review Security Hotspots**
+- Don't ignore Security Hotspots tab in SonarQube
+- Quality Gate won't pass until reviewed
+
+### 3. **Using Regular Gmail Password**
+- Won't work even with "Less secure apps" enabled
+- Always use App Passwords
+
+### 4. **Not Setting Proper Permissions**
+```bash
+# ZAP reports need write permission
+-v ${WORKSPACE}/reports:/zap/wrk/:rw  # Note the :rw
+```
+
+### 5. **Polling Too Aggressively**
+```groovy
+# ❌ Can overload system
+pollSCM('* * * * *')  # Every minute
+
+# ✅ Better for production
+pollSCM('H/5 * * * *')  # Every 5 minutes, distributed
+```
+
+---
+
+## 📌 Best Practices
+
+### Security
+
+1. **Never Hardcode Credentials**
+```groovy
+# ❌ Bad
+environment {
+    DB_PASS = 'password123'
+}
+
+# ✅ Good
+environment {
+    DB_PASS = credentials('database-password')
+}
+```
+
+2. **Use Separate Tokens per Environment**
+- Dev, Staging, Prod should have different SonarQube tokens
+- Easier to revoke if compromised
+
+3. **Implement Quality Gates**
+- Set minimum code coverage (e.g., 80%)
+- Fail builds on critical vulnerabilities
+- Require all security hotspots reviewed
+
+### Performance
+
+1. **Optimize Docker Images**
+```dockerfile
+# Use specific versions, not 'latest'
+FROM node:16-alpine
+
+# Multi-stage builds for smaller images
+FROM node:16 AS builder
+# ... build steps
+FROM node:16-alpine
+COPY --from=builder /app /app
+```
+
+2. **Clean Up Docker Resources**
+```bash
+# Add to Jenkins pipeline
+sh 'docker system prune -f'
+```
+
+3. **Limit Log Retention**
+- Jenkins: Manage Jenkins → Configure System → Discard Old Builds
+- Keep last 10 builds to save disk space
+
+### Monitoring
+
+1. **Set Up Disk Space Alerts**
+```bash
+# Add to crontab
+df -h / | awk 'NR==2 {if ($5+0 > 80) print "Disk usage: " $5}'
+```
+
+2. **Monitor Container Health**
+```bash
+# Add health checks to docker-compose
+healthcheck:
+  test: ["CMD", "curl", "-f", "http://localhost:8080"]
+  interval: 30s
+  timeout: 10s
+  retries: 3
+```
+
+---
+
+## 🚀 Quick Reference Commands
+
+### Docker Commands
+
+```bash
+# View all containers
+docker ps -a
+
+# View logs
+docker logs <container-name> --tail 50 -f
+
+# Restart container
+docker restart <container-name>
+
+# Remove container
+docker stop <container-name> && docker rm <container-name>
+
+# Clean up unused resources
+docker system prune -af
+
+# Check disk usage
+docker system df
+
+# Execute command inside container
+docker exec -it <container-name> bash
+```
+
+### Jenkins Commands
+
+```bash
+# Get initial admin password
+docker exec jenkins-server cat /var/jenkins_home/secrets/initialAdminPassword
+
+# Restart Jenkins
+docker restart jenkins-server
+
+# View Jenkins logs
+docker logs jenkins-server -f
+
+# Backup Jenkins data
+docker cp jenkins-server:/var/jenkins_home ./jenkins-backup
+```
+
+### SonarQube Commands
+
+```bash
+# View SonarQube logs
+docker logs sonarqube-server -f
+
+# Reset admin password (inside container)
+docker exec -it sonarqube-server bash
+cd /opt/sonarqube/bin/linux-x86-64
+./sonar.sh reset-admin-password
+```
+
+### Troubleshooting Commands
+
+```bash
+# Check port usage
+sudo netstat -tlnp | grep 8080
+
+# Check Docker socket permissions
+ls -l /var/run/docker.sock
+
+# Verify Docker can be accessed
+docker run hello-world
+
+# Check disk space
+df -h
+
+# Check memory usage
+free -h
+
+# Check CPU usage
+top
+```
+
+---
+
+## 📊 Monitoring Checklist
+
+- [ ] All containers running (`docker ps`)
+- [ ] Jenkins accessible on port 8080
+- [ ] SonarQube accessible on port 9000
+- [ ] Production app accessible on port 8082
+- [ ] No containers restarting repeatedly
+- [ ] Disk space > 20% free
+- [ ] Email notifications working
+- [ ] Quality Gate properly configured
+- [ ] Security Hotspots reviewed
+- [ ] Pipeline executing successfully
+
+---
+
+## 🎓 Key Learnings
+
+1. **Docker-in-Docker requires absolute host paths** for volume mounts
+2. **SCM Polling is more reliable than webhooks** in local/NAT environments
+3. **Security Hotspots must be manually reviewed** in SonarQube
+4. **Gmail requires App Passwords** for automated SMTP
+5. **Quality Gates are strict** - address all security concerns
+6. **Always use `:rw` permission** for ZAP report volumes
+7. **Poll SCM wisely** - balance freshness vs system load
+
+---
+
+## 📞 Support & Resources
+
+### Official Documentation
+- [Jenkins](https://www.jenkins.io/doc/)
+- [SonarQube](https://docs.sonarqube.org/)
+- [OWASP ZAP](https://www.zaproxy.org/docs/)
+- [Docker](https://docs.docker.com/)
+
+### Community Support
+- [Jenkins Community Forums](https://community.jenkins.io/)
+- [SonarQube Community](https://community.sonarsource.com/)
+- [OWASP Slack](https://owasp.org/slack/invite)
+
+---
+
+## 📝 Change Log
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | 2026-04-19 | Initial master reference created |
+
+---
+
+<div align="center">
+
+## 🏆 **Built Through Real Problem-Solving**
+
+*This guide represents actual engineering challenges overcome in production-like environments.*
+
+**Created by: [Saleem Ali](https://www.linkedin.com/in/saleem-ali-189719325/)**
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?style=for-the-badge&logo=linkedin)](https://www.linkedin.com/in/saleem-ali-189719325/)
+[![GitHub](https://img.shields.io/badge/GitHub-Follow-black?style=for-the-badge&logo=github)](https://github.com/ali4210)
+
+---
+
+**"Real problems, real solutions, real engineering."**
+
+</div>
